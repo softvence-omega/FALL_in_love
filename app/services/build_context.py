@@ -16,7 +16,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize global reranker (loaded once at startup)
-reranker = LocalReranker()
+try:
+    reranker = LocalReranker()
+    logger.info("✅ Reranker initialized successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize reranker: {e}")
+    reranker = None
 
 
 def _version_number(v) -> float:
@@ -51,6 +56,11 @@ async def rerank_documents_async(query: str, documents: list, top_k: int = 5) ->
     if not documents:
         return []
     
+    # Fallback if reranker is not available
+    if reranker is None:
+        logger.warning("⚠️ Reranker not available, returning original order")
+        return [{"document": doc, "relevance_score": None} for doc in documents[:top_k]]
+    
     try:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -62,7 +72,7 @@ async def rerank_documents_async(query: str, documents: list, top_k: int = 5) ->
         )
     except Exception as e:
         logger.error(f"❌ Reranking failed: {e}")
-        return [{"document": doc, "score": 0.0} for doc in documents[:top_k]]
+        return [{"document": doc, "relevance_score": None} for doc in documents[:top_k]]
     
 async def search_law_collection_async(
     client, 

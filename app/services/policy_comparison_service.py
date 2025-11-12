@@ -246,8 +246,88 @@ async def cosine_similarity_test(file: UploadFile, organization_type: str):
     }
 
 
+# async def combined_alignment_analysis(text: str, title: str, organization_type: str) -> Dict[str, object]:
+#     """Ultra-fast parallel analysis with optimized OpenAI calls"""
+#     openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    
+#     # Step 1: Fetch Weaviate data (PDF text already provided)
+#     weaviate_full_text = await fetch_weaviate_full_text(organization_type)
+
+    
+#     # Step 2: Parallel summarization (text already extracted)
+#     pdf_summary, weaviate_summary = await asyncio.gather(
+#         summarize_large_text(openai_client, text, title),
+#         summarize_large_text(openai_client, weaviate_full_text, "Main Laws")
+#     )
+    
+#     # Step 3: Single optimized LLM call for everything
+#     combined_prompt = (
+#         f"Analyze these policy summaries and provide a complete analysis:\n\n"
+#         f"PDF Summary:\n{pdf_summary}\n\n"
+#         f"Policy Summary:\n{weaviate_summary}\n\n"
+#         f"Return strict JSON with this exact structure:\n"
+#         f"{{\n"
+#         f'  "direct_conflict": true or false,\n'
+#         f'  "conflicts": ["conflict1", "conflict2", ...],\n'
+#         f'  "differences": ["diff1", "diff2", ...],\n'
+#         f'  "paragraph": "Single paragraph (4-6 sentences) explaining conflicts or key differences without mentioning system names."\n'
+#         f"}}"
+#     )
+    
+#     try:
+#         resp = await asyncio.to_thread(
+#             openai_client.chat.completions.create,
+#             model="gpt-4o-mini",
+#             messages=[
+#                 {"role": "system", "content": "You are a precise policy analyst. Return only valid JSON."},
+#                 {"role": "user", "content": combined_prompt}
+#             ],
+#             temperature=0.1,
+#             max_tokens=1000
+#         )
+        
+#         total_tokens = resp.usage.total_tokens
+#         content = resp.choices[0].message.content.strip()
+        
+#         # Clean JSON response
+#         if content.startswith("```json"):
+#             content = content[7:]
+#         if content.endswith("```"):
+#             content = content[:-3]
+        
+#         result = json.loads(content.strip())
+        
+#         # Calculate alignment score
+#         if result.get("direct_conflict", False):
+#             conflict_count = len(result.get("conflicts", []))
+#             not_alignment_percent = min(85 + (conflict_count * 5), 100)
+#         else:
+#             difference_count = len(result.get("differences", []))
+#             not_alignment_percent = min(10 + (difference_count * 5), 35)
+        
+#         return {
+#             "not_alignment_percent": round(not_alignment_percent, 1),
+#             "contradiction_paragraph": result.get("paragraph", "Analysis unavailable."),
+#             "tokens_used": total_tokens
+#         }
+        
+#     except json.JSONDecodeError as e:
+#         logger.error(f"JSON parse error: {str(e)}")
+#         return {
+#             "not_alignment_percent": 25.0,
+#             "contradiction_paragraph": "Analysis completed but formatting error occurred.",
+#             "tokens_used": 0
+#         }
+#     except Exception as e:
+#         logger.warning(f"Combined analysis failed: {str(e)}")
+#         return {
+#             "not_alignment_percent": 25.0,
+#             "contradiction_paragraph": "Analysis unavailable due to processing error.",
+#             "tokens_used": 0
+#         }
+
 async def combined_alignment_analysis(text: str, title: str, organization_type: str) -> Dict[str, object]:
-    """Ultra-fast parallel analysis with optimized OpenAI calls"""
+    """Ultra-fast parallel analysis with actionable suggestions"""
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
     
     # Step 1: Fetch Weaviate data (PDF text already provided)
@@ -260,9 +340,9 @@ async def combined_alignment_analysis(text: str, title: str, organization_type: 
         summarize_large_text(openai_client, weaviate_full_text, "Main Laws")
     )
     
-    # Step 3: Single optimized LLM call for everything
+    # Step 3: Single optimized LLM call with suggestions
     combined_prompt = (
-        f"Analyze these policy summaries and provide a complete analysis:\n\n"
+        f"Analyze these policy summaries and provide a complete analysis with actionable suggestions:\n\n"
         f"PDF Summary:\n{pdf_summary}\n\n"
         f"Policy Summary:\n{weaviate_summary}\n\n"
         f"Return strict JSON with this exact structure:\n"
@@ -270,8 +350,20 @@ async def combined_alignment_analysis(text: str, title: str, organization_type: 
         f'  "direct_conflict": true or false,\n'
         f'  "conflicts": ["conflict1", "conflict2", ...],\n'
         f'  "differences": ["diff1", "diff2", ...],\n'
+        f'  "suggestions": [\n'
+        f'    {{\n'
+        f'      "issue": "Brief description of the conflict/difference",\n'
+        f'      "recommendation": "Specific action to resolve it",\n'
+        f'      "priority": "high/medium/low"\n'
+        f'    }}\n'
+        f'  ],\n'
         f'  "paragraph": "Single paragraph (4-6 sentences) explaining conflicts or key differences without mentioning system names."\n'
-        f"}}"
+        f"}}\n\n"
+        f"IMPORTANT: For each conflict or significant difference, provide a clear suggestion with:\n"
+        f"- The specific issue that needs attention\n"
+        f"- A concrete recommendation on how to fix it\n"
+        f"- Priority level (high for conflicts, medium/low for differences)\n"
+        f"If no conflicts exist, provide suggestions for improvement or alignment."
     )
     
     try:
@@ -279,11 +371,11 @@ async def combined_alignment_analysis(text: str, title: str, organization_type: 
             openai_client.chat.completions.create,
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a precise policy analyst. Return only valid JSON."},
+                {"role": "system", "content": "You are a precise policy analyst. Return only valid JSON with actionable suggestions."},
                 {"role": "user", "content": combined_prompt}
             ],
             temperature=0.1,
-            max_tokens=1000
+            max_tokens=1500  # Increased for suggestions
         )
         
         total_tokens = resp.usage.total_tokens
@@ -305,28 +397,51 @@ async def combined_alignment_analysis(text: str, title: str, organization_type: 
             difference_count = len(result.get("differences", []))
             not_alignment_percent = min(10 + (difference_count * 5), 35)
         
+        # Ensure suggestions exist
+        suggestions = result.get("suggestions", [])
+        if not suggestions and (result.get("conflicts") or result.get("differences")):
+            # Fallback: Generate basic suggestions from conflicts/differences
+            suggestions = []
+            for conflict in result.get("conflicts", [])[:3]:
+                suggestions.append({
+                    "issue": conflict,
+                    "recommendation": "Review and align this section with regulatory requirements",
+                    "priority": "high"
+                })
+            for diff in result.get("differences", [])[:2]:
+                suggestions.append({
+                    "issue": diff,
+                    "recommendation": "Consider updating to match best practices",
+                    "priority": "medium"
+                })
+        
         return {
             "not_alignment_percent": round(not_alignment_percent, 1),
             "contradiction_paragraph": result.get("paragraph", "Analysis unavailable."),
+            "suggestions": suggestions,
             "tokens_used": total_tokens
         }
         
     except json.JSONDecodeError as e:
         logger.error(f"JSON parse error: {str(e)}")
         return {
-            "not_alignment_percent": 25.0,
+            "not_alignment_percent": 0,
             "contradiction_paragraph": "Analysis completed but formatting error occurred.",
-            "tokens_used": 0
+            "suggestions": [],
+            "tokens_used": 0,
+            "error": str(e)
         }
     except Exception as e:
         logger.warning(f"Combined analysis failed: {str(e)}")
         return {
-            "not_alignment_percent": 25.0,
+            "not_alignment_percent": 0,
             "contradiction_paragraph": "Analysis unavailable due to processing error.",
-            "tokens_used": 0
+            "suggestions": [],
+            "tokens_used": 0,
+            "error": str(e)
         }
-
-
+    
+# ---------------------------------------------------------------------------------------------------
 async def summarize_pdf_and_policies(text: str, title: str, organization_type: str) -> Dict[str, str]:
     """Fast parallel summarization of PDF and policies"""
     openai_client = OpenAI(api_key=OPENAI_API_KEY)

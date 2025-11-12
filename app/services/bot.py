@@ -258,11 +258,13 @@ async def ask_doc_bot(
         save_start = asyncio.get_event_loop().time()
         
         readcount_data = {}
+
         if json_answer.get('used_document', False) and org_context:
             for c in org_context:
                 doc_id = c.properties.get("document_id", "")
                 if doc_id:
                     readcount_data[doc_id] = 1
+                    
         
         history_data = {
             "prompt": question,
@@ -291,12 +293,41 @@ async def ask_doc_bot(
         total_time = asyncio.get_event_loop().time() - start_time
         logger.info(f"🎯 Total: {total_time:.2f}s")
         
-        return JSONResponse(status_code=200, content={
+        # ============ BUILD SOURCE DOCUMENTS LIST ============
+        source_documents = []
+        used_document = json_answer.get('used_document', False)
+
+        # Only include source documents if the bot actually used them
+        if used_document:
+            # Add organization context sources (for POLICY questions)
+            if org_context and question_type in ["POLICY", "MIXED"]:
+                for i, doc in enumerate(org_context, 1):
+                    source_documents.append({
+                        "document_id": doc.properties.get("document_id", ""),
+                        # "chunk_index": i
+                    })
+            
+            # Add law context sources (for LAW or MIXED questions)
+            if law_context and question_type in ["LAW", "MIXED"]:
+                for i, doc in enumerate(law_context, 1):
+                    source_documents.append({
+                        "document_id": doc.properties.get("document_id", ""),
+                        # "chunk_index": i
+                    })
+
+        # ============ BUILD RESPONSE (CONDITIONAL SOURCE DOCS) ============
+        response_content = {
             "status": "success",
             "question": question,
             "answer": json_answer['answer'],
             "used_tokens": used_tokens
-        })
+        }
+
+        # Only add source_documents if bot used documents
+        if used_document and source_documents:
+            response_content["source_documents"] = source_documents
+
+        return JSONResponse(status_code=200, content=response_content)
     
     except Exception as e:
         logger.error(f"❌ Unexpected error: {e}")
