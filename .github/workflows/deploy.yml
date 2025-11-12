@@ -33,7 +33,9 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            docker pull softvence/policeynestai:latest
-            docker stop policeynestai || true
-            docker rm policeynestai || true
-            docker run -d --name policeynestai -p 8000:8000 --env-file /home/ubuntu/app/.env softvence/policeynestai:latest
+            sudo docker pull softvence/policeynestai:latest
+            sudo docker stop policeynestai || true
+            sudo docker rm policeynestai || true
+            sudo docker run -d --name policeynestai -p 8000:8000 --env-file /home/ubuntu/FALL_in_love/.env softvence/policeynestai:latest
+
+
