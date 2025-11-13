@@ -7,6 +7,7 @@ from app.services.system_prompt_builder import build_system_prompt
 from app.services.fetch_history import fetch_history_async
 from app.services.store_data import save_data_parallel
 from app.services.build_context import build_context_from_weaviate_results
+from app.services.content_formatter import build_user_message_with_context, build_minimal_history
 from app.services.content_formatter import formatted_content
 from app.config import RAG_CONFIG
 from app.services.cross_encoder_model import LocalReranker
@@ -22,14 +23,32 @@ reranker = LocalReranker()
 
 def classify_question_type(question: str) -> str:
     """
-    Classify question as LAW, POLICY, or MIXED
+    Classify question as CASUAL, EMERGENCY, INFORMATIVE, LAW, POLICY, or MIXED
     
-    Strategy: Most aged care questions benefit from BOTH legal context AND organizational policy
-    So we default to MIXED unless user explicitly asks for only law or only policy
-    
-    Returns: "LAW", "POLICY", or "MIXED"
+    Returns: "CASUAL", "EMERGENCY", "INFORMATIVE", "LAW", "POLICY", or "MIXED"
     """
-    q_lower = question.lower()
+    q_lower = question.lower().strip()
+    
+    # CASUAL CHAT - Simple greetings and personal questions
+    casual_indicators = [
+        'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',
+        'how are you', 'how about you', 'what\'s your name', 'who are you',
+        'thanks', 'thank you', 'bye', 'goodbye', 'see you', 'nice to meet you'
+    ]
+    
+    # EMERGENCY - Urgent situations requiring immediate help
+    emergency_indicators = [
+        'earthquake', 'fire', 'accident', 'emergency', 'help', 'urgent', 'crisis',
+        'vumikompo', 'ভূমিকম্প', 'আগুন', 'দুর্ঘটনা', 'জরুরি', 'সাহায্য'
+    ]
+    
+    # Check for casual chat
+    if any(indicator in q_lower for indicator in casual_indicators) or len(q_lower) <= 3:
+        return "CASUAL"
+    
+    # Check for emergency situations
+    if any(indicator in q_lower for indicator in emergency_indicators):
+        return "EMERGENCY"
     
     # ONLY LAW - User explicitly wants just legal information
     only_law_indicators = [
@@ -54,14 +73,92 @@ def classify_question_type(question: str) -> str:
     if any(indicator in q_lower for indicator in only_policy_indicators):
         return "POLICY"
     
-    # DEFAULT: For general aged care questions, provide BOTH perspectives
-    # Examples that will be MIXED:
-    # - "What is medication management?"
-    # - "Tell me about resident rights"
-    # - "How to handle falls?"
-    # - "What are infection control procedures?"
+    # INFORMATIVE - General knowledge questions (default for most questions)
+    # Examples: "What is medication management?", "How to handle falls?"
+    return "INFORMATIVE"
+def log_cache_stats(response):
+    """
+    Extract and log cache statistics from OpenAI response
+    """
+    usage = response.usage
     
-    return "MIXED"
+    # Basic token counts
+    prompt_tokens = usage.prompt_tokens
+    completion_tokens = usage.completion_tokens
+    total_tokens = usage.total_tokens
+    
+    # Try to get cache info (if available)
+    cached_tokens = 0
+    cache_creation_tokens = 0
+    
+    if hasattr(usage, 'prompt_tokens_details'):
+        details = usage.prompt_tokens_details
+        
+        # Cached tokens (tokens read from cache)
+        if hasattr(details, 'cached_tokens'):
+            cached_tokens = details.cached_tokens
+        
+        # Cache creation tokens (new tokens being cached)
+        if hasattr(details, 'cache_creation_tokens'):
+            cache_creation_tokens = details.cache_creation_tokens
+    
+    # Calculate metrics
+    cache_hit_rate = (cached_tokens / prompt_tokens * 100) if prompt_tokens > 0 else 0
+    new_tokens = prompt_tokens - cached_tokens
+    
+    # Log with emojis for visibility
+    logger.info("=" * 60)
+    logger.info("📊 TOKEN USAGE BREAKDOWN")
+    logger.info("=" * 60)
+    logger.info(f"Total tokens used: {total_tokens}")
+    logger.info(f"  ├─ Prompt tokens: {prompt_tokens}")
+    logger.info(f"  │   ├─ 🎯 Cached (from cache): {cached_tokens}")
+    logger.info(f"  │   ├─ 💾 Cache creation (being cached): {cache_creation_tokens}")
+    logger.info(f"  │   └─ ⚡ New (not cached): {new_tokens}")
+    logger.info(f"  └─ Completion tokens: {completion_tokens}")
+    logger.info(f"")
+    logger.info(f"📈 Cache Performance:")
+    logger.info(f"  ├─ Cache hit rate: {cache_hit_rate:.1f}%")
+    logger.info(f"  └─ Status: {'✅ Excellent!' if cache_hit_rate > 70 else '⚠️ Low - check system prompt' if cache_hit_rate > 0 else '❌ No caching detected'}")
+    logger.info("=" * 60)
+    
+    # Cost calculation
+    # gpt-4o pricing: Input $2.50/M, Cached input $1.25/M, Output $10/M
+    cost_new = new_tokens * 2.50 / 1_000_000
+    cost_cached = cached_tokens * 1.25 / 1_000_000
+    cost_output = completion_tokens * 10 / 1_000_000
+    total_cost = cost_new + cost_cached + cost_output
+    
+    # What it would have cost WITHOUT caching
+    cost_without_cache = prompt_tokens * 2.50 / 1_000_000 + cost_output
+    savings = cost_without_cache - total_cost
+    
+    logger.info(f"💰 Cost for this request:")
+    logger.info(f"  ├─ New tokens: ${cost_new:.6f}")
+    logger.info(f"  ├─ Cached tokens: ${cost_cached:.6f}")
+    logger.info(f"  ├─ Output tokens: ${cost_output:.6f}")
+    logger.info(f"  └─ Total: ${total_cost:.6f}")
+    logger.info(f"")
+    logger.info(f"💸 Savings from caching:")
+    logger.info(f"  ├─ Without cache: ${cost_without_cache:.6f}")
+    logger.info(f"  ├─ With cache: ${total_cost:.6f}")
+    logger.info(f"  └─ Saved: ${savings:.6f} ({savings/cost_without_cache*100:.1f}%)")
+    logger.info("=" * 60)
+    
+    return {
+        "total_tokens": total_tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cached_tokens": cached_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "new_tokens": new_tokens,
+        "cache_hit_rate": f"{cache_hit_rate:.1f}%",
+        "cost": {
+            "total": f"${total_cost:.6f}",
+            "saved": f"${savings:.6f}",
+            "savings_percent": f"{savings/cost_without_cache*100:.1f}%"
+        }
+    }
 
 async def ask_doc_bot(
     question: str, 
@@ -75,23 +172,23 @@ async def ask_doc_bot(
     
     try:
         # ================= VALIDATION =================
-        if not question or len(question.strip()) < 3:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "message": "Question too short (minimum 3 characters)"
-                }
-            )
+        # if not question or len(question.strip()) < 3:
+        #     return JSONResponse(
+        #         status_code=400,
+        #         content={
+        #             "status": "error",
+        #             "message": "Question too short (minimum 3 characters)"
+        #         }
+        #     )
         
-        if len(question) > 1000:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "message": "Question too long (maximum 1000 characters)"
-                }
-            )
+        # if len(question) > 1000:
+        #     return JSONResponse(
+        #         status_code=400,
+        #         content={
+        #             "status": "error",
+        #             "message": "Question too long (maximum 1000 characters)"
+        #         }
+        #     )
         
         if not organization or not auth_token:
             return JSONResponse(
@@ -112,29 +209,38 @@ async def ask_doc_bot(
         question_type = classify_question_type(question)
         logger.info(f"📝 Question type: {question_type}")
         
-        # ================= PARALLEL FETCH =================
+        # ================= CONDITIONAL PARALLEL FETCH =================
         logger.info("⏱️ Starting parallel fetch...")
         fetch_start = asyncio.get_event_loop().time()
         
         try:
             history_task = fetch_history_async(auth_token, limit=10, offset=0)
-            context_task = build_context_from_weaviate_results(
-                organization=organization,
-                query_text=question,
-                question_type=question_type
-            )
             
-            history_result, context_result = await asyncio.gather(
-                history_task, 
-                context_task,
-                return_exceptions=True
-            )
+            # Skip context fetching for CASUAL questions only
+            if question_type == "CASUAL":
+                logger.info("⏭️ Skipping context fetch for casual question")
+                history_result = await history_task
+                context_result = {"org_context": [], "law_context": []}
+            else:
+                # Fetch context for EMERGENCY, INFORMATIVE, LAW, POLICY questions
+                context_task = build_context_from_weaviate_results(
+                    organization=organization,
+                    query_text=question,
+                    question_type=question_type
+                )
+                
+                history_result, context_result = await asyncio.gather(
+                    history_task, 
+                    context_task,
+                    return_exceptions=True
+                )
+                
+                if isinstance(context_result, Exception):
+                    logger.error(f"Context fetch failed: {context_result}")
+                    context_result = {"org_context": [], "law_context": []}
             
             if isinstance(history_result, Exception):
                 raise history_result
-            if isinstance(context_result, Exception):
-                logger.error(f"Context fetch failed: {context_result}")
-                context_result = {"org_context": [], "law_context": []}
             
             org_context = context_result.get("org_context", [])
             law_context = context_result.get("law_context", [])
@@ -168,20 +274,42 @@ async def ask_doc_bot(
         #     )
         
         # Build chat history
-        chat_history = []
-        for h in history_result.get('histories', []):
-            chat_history.append({"role": "user", "content": h['prompt']})
-            chat_history.append({"role": "assistant", "content": h['response']})
+
+        # chat_history = []
+        # for h in history_result.get('histories', []):
+        #     chat_history.append({"role": "user", "content": h['prompt']})
+        #     chat_history.append({"role": "assistant", "content": h['response']})
+        chat_history = build_minimal_history(
+            history_result.get('histories', []),
+            max_pairs=2  # Only last 2 exchanges
+        )
         
         # ================= BUILD PROMPT =================
-        system_prompt = build_system_prompt(question_type)
+        system_prompt = build_system_prompt() # For caching, static system prompt
         
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(chat_history)
         
         formatted_content_str = await formatted_content(question_type, org_context, law_context)
         
-        user_content = f"{formatted_content_str}QUESTION: {question}"
+        # user_content = f"{formatted_content_str}QUESTION: {question}"
+
+        # ✅ Extract previous assistant responses
+        previous_responses = []
+        for h in history_result.get('histories', [])[-3:]:  # শেষ 3টা
+            if 'response' in h:
+                previous_responses.append(h['response'])
+
+        # User message build করার সময়
+        user_content = await build_user_message_with_context(
+            question=question,
+            question_type=question_type,
+            org_context=org_context,
+            law_context=law_context,
+            formatted_content_str=formatted_content_str,
+            previous_responses=previous_responses  # ← পাঠানো
+        )
+
         messages.append({"role": "user", "content": user_content})
         
         # ================= LLM CALL WITH FORCED JSON =================
@@ -191,9 +319,13 @@ async def ask_doc_bot(
         try:
             async with AsyncOpenAI(api_key=OPENAI_API_KEY) as openai_client:
                 response = await openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model="gpt-4o",  # ✅ Cache-supported model
                     messages=messages,
-                    temperature=0.3,
+                    temperature=0.95,
+                    top_p=0.95,               # NEW
+                    frequency_penalty=0.5,    # NEW - reduces repetition
+                    presence_penalty=0.3,     # NEW - encourages variety
+                    max_completion_tokens=3000,
                     response_format={"type": "json_object"}
                 )
         except openai.APIError as e:
@@ -225,6 +357,9 @@ async def ask_doc_bot(
             )
         
         llm_time = asyncio.get_event_loop().time() - llm_start
+
+        cache_stats = log_cache_stats(response)
+        print("cache statistics-----------------\n", cache_stats)
         used_tokens = response.usage.total_tokens
         
         logger.info(f"✅ LLM done: {llm_time:.2f}s | Tokens: {used_tokens}")
@@ -316,6 +451,7 @@ async def ask_doc_bot(
                     })
 
         # ============ BUILD RESPONSE (CONDITIONAL SOURCE DOCS) ============
+        print("llm answer:-----------------\n", json_answer['answer'])
         response_content = {
             "status": "success",
             "question": question,
