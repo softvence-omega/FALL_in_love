@@ -221,7 +221,6 @@ async def build_context_from_weaviate_results(
                 top_k=RAG_CONFIG["rerank_top_k"]
             )
             law_context = [item['document'] for item in law_reranked]
-        
         result = {
             "org_context": org_context,
             "law_context": law_context

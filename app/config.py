@@ -15,6 +15,7 @@ BACKEND_TOKEN_COUNT_URL = f"{BASE_URL}/ai/TokenCount/"
 BACKEND_DOC_READ_COUNT_URL = f"{BASE_URL}/documents/Count/"
 
 GLOBAL_ORG = "GlobalLaw"
+LAW_COLLECTION=["AgedCareAct", "HomeCareAct", "NDIS", "GeneralAct", "Others"]
 
 RAG_CONFIG = {
     "initial_fetch": int(os.getenv("RAG_INITIAL_LIMIT", "20")),

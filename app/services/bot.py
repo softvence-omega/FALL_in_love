@@ -7,7 +7,7 @@ from app.services.system_prompt_builder import build_system_prompt
 from app.services.fetch_history import fetch_history_async
 from app.services.store_data import save_data_parallel
 from app.services.build_context import build_context_from_weaviate_results
-from app.services.content_formatter import formatted_content
+from app.services.content_formatter import formatted_content, build_user_message_with_context
 from app.config import RAG_CONFIG
 from app.services.cross_encoder_model import LocalReranker
 import logging
@@ -20,48 +20,48 @@ logger = logging.getLogger(__name__)
 # Initialize global reranker
 reranker = LocalReranker()
 
-def classify_question_type(question: str) -> str:
-    """
-    Classify question as LAW, POLICY, or MIXED
+# def classify_question_type(question: str) -> str:
+#     """
+#     Classify question as LAW, POLICY, or MIXED
     
-    Strategy: Most aged care questions benefit from BOTH legal context AND organizational policy
-    So we default to MIXED unless user explicitly asks for only law or only policy
+#     Strategy: Most aged care questions benefit from BOTH legal context AND organizational policy
+#     So we default to MIXED unless user explicitly asks for only law or only policy
     
-    Returns: "LAW", "POLICY", or "MIXED"
-    """
-    q_lower = question.lower()
+#     Returns: "LAW", "POLICY", or "MIXED"
+#     """
+#     q_lower = question.lower()
     
-    # ONLY LAW - User explicitly wants just legal information
-    only_law_indicators = [
-        'what does the law say', 'according to law only',
-        'legal requirement only', 'just the legislation',
-        'only the act', 'law states', 'legally required'
-    ]
+#     # ONLY LAW - User explicitly wants just legal information
+#     only_law_indicators = [
+#         'what does the law say', 'according to law only',
+#         'legal requirement only', 'just the legislation',
+#         'only the act', 'law states', 'legally required'
+#     ]
     
-    # ONLY POLICY - User explicitly wants just org policy
-    only_policy_indicators = [
-        'our policy', 'our organization', 'our procedure',
-        'we use', 'our guideline', 'company policy',
-        'internal procedure', 'our approach', 'how do we',
-        'what is our', 'our process'
-    ]
+#     # ONLY POLICY - User explicitly wants just org policy
+#     only_policy_indicators = [
+#         'our policy', 'our organization', 'our procedure',
+#         'we use', 'our guideline', 'company policy',
+#         'internal procedure', 'our approach', 'how do we',
+#         'what is our', 'our process'
+#     ]
     
-    # Check for explicit "only law" requests
-    if any(indicator in q_lower for indicator in only_law_indicators):
-        return "LAW"
+#     # Check for explicit "only law" requests
+#     if any(indicator in q_lower for indicator in only_law_indicators):
+#         return "LAW"
     
-    # Check for explicit "only policy" requests  
-    if any(indicator in q_lower for indicator in only_policy_indicators):
-        return "POLICY"
+#     # Check for explicit "only policy" requests  
+#     if any(indicator in q_lower for indicator in only_policy_indicators):
+#         return "POLICY"
     
-    # DEFAULT: For general aged care questions, provide BOTH perspectives
-    # Examples that will be MIXED:
-    # - "What is medication management?"
-    # - "Tell me about resident rights"
-    # - "How to handle falls?"
-    # - "What are infection control procedures?"
+#     # DEFAULT: For general aged care questions, provide BOTH perspectives
+#     # Examples that will be MIXED:
+#     # - "What is medication management?"
+#     # - "Tell me about resident rights"
+#     # - "How to handle falls?"
+#     # - "What are infection control procedures?"
     
-    return "MIXED"
+#     return "MIXED"
 
 async def ask_doc_bot(
     question: str, 
@@ -75,23 +75,23 @@ async def ask_doc_bot(
     
     try:
         # ================= VALIDATION =================
-        if not question or len(question.strip()) < 3:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "message": "Question too short (minimum 3 characters)"
-                }
-            )
+        # if not question or len(question.strip()) < 3:
+        #     return JSONResponse(
+        #         status_code=400,
+        #         content={
+        #             "status": "error",
+        #             "message": "Question too short (minimum 3 characters)"
+        #         }
+        #     )
         
-        if len(question) > 1000:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "message": "Question too long (maximum 1000 characters)"
-                }
-            )
+        # if len(question) > 1000:
+        #     return JSONResponse(
+        #         status_code=400,
+        #         content={
+        #             "status": "error",
+        #             "message": "Question too long (maximum 1000 characters)"
+        #         }
+        #     )
         
         if not organization or not auth_token:
             return JSONResponse(
@@ -109,8 +109,8 @@ async def ask_doc_bot(
             return validation_response
         
         # ================= CLASSIFY QUESTION =================
-        question_type = classify_question_type(question)
-        logger.info(f"📝 Question type: {question_type}")
+        # question_type = classify_question_type(question)
+        # logger.info(f"📝 Question type: {question_type}")
         
         # ================= PARALLEL FETCH =================
         logger.info("⏱️ Starting parallel fetch...")
@@ -121,7 +121,7 @@ async def ask_doc_bot(
             context_task = build_context_from_weaviate_results(
                 organization=organization,
                 query_text=question,
-                question_type=question_type
+                question_type="MIXED"
             )
             
             history_result, context_result = await asyncio.gather(
@@ -174,14 +174,30 @@ async def ask_doc_bot(
             chat_history.append({"role": "assistant", "content": h['response']})
         
         # ================= BUILD PROMPT =================
-        system_prompt = build_system_prompt(question_type)
+        system_prompt = build_system_prompt()
         
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(chat_history)
-        
+        question_type = "MIXED"
         formatted_content_str = await formatted_content(question_type, org_context, law_context)
+
+        previous_responses = []
+        for h in history_result.get('histories', [])[-3:]:  # শেষ 3টা
+            if 'response' in h:
+                previous_responses.append(h['response'])
+
+        # User message build করার সময়
+        user_content = await build_user_message_with_context(
+            question=question,
+            question_type=question_type,
+            org_context=org_context,
+            law_context=law_context,
+            formatted_content_str=formatted_content_str,
+            previous_responses=previous_responses,
+            # response_instructions=response_instructions
+        )
         
-        user_content = f"{formatted_content_str}QUESTION: {question}"
+        # user_content = f"{formatted_content_str}QUESTION: {question}"
         messages.append({"role": "user", "content": user_content})
         
         # ================= LLM CALL WITH FORCED JSON =================
@@ -191,9 +207,13 @@ async def ask_doc_bot(
         try:
             async with AsyncOpenAI(api_key=OPENAI_API_KEY) as openai_client:
                 response = await openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model="gpt-4o",
                     messages=messages,
-                    temperature=0.3,
+                    temperature=0.6,
+                    top_p=0.95,                   # new
+                    frequency_penalty=0.3,        # ✅ 0.5 থেকে 0.3 (0.5 too aggressive)
+                    presence_penalty=0.2,         # ✅ 0.3 থেকে 0.2 (slightly lower)
+                    max_completion_tokens=3000,   # ✅ Perfect for detailed responses
                     response_format={"type": "json_object"}
                 )
         except openai.APIError as e:
@@ -249,7 +269,7 @@ async def ask_doc_bot(
         
         if question_type == "MIXED":
             # For MIXED: only true if org context was actually used
-            if not org_context:
+            if not org_context and not law_context:
                 json_answer['used_document'] = False
                 logger.info("ℹ️ MIXED question with no org context: used_document=False")
         
